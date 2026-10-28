@@ -1,0 +1,732 @@
+pub mod loader;
+
+use basic_types::blocks::{Block, Type};
+
+use super::*;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Debug;
+use std::sync::mpsc::{Receiver, Sender, channel};
+
+use crate::SPAWN_CHUNK_RADIUS;
+use crate::entity::ItemEntity;
+use crate::loader::WorldLoader;
+use crate::packets::Packet;
+use crate::types::position::BlockPosition;
+
+pub struct World {
+	pub dimensions: HashMap<String, Dimension>,
+	pub loader: Box<dyn WorldLoader>,
+	pub default_spawn_location: BlockPosition,
+}
+
+pub struct Dimension {
+	pub chunks: HashMap<(i32, i32), Chunk>,
+	pub entities: Vec<Entity>,
+	pub name: String,
+	pub lowest_block_y: i16,
+	pub chunks_loading_sender: Sender<(i32, i32)>,
+	pub chunks_loading_receiver: Option<Receiver<(i32, i32)>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Chunk {
+	pub x: i32,
+	pub z: i32,
+	pub sections: Vec<ChunkSection>,
+	pub inhabited_time: i64,
+	pub last_update: i64,
+	pub is_light_on: bool,
+	pub modified: bool,
+	pub block_entities: Vec<BlockEntity>,
+	pub keep_loaded_for_ticks: i32,
+	pub heightmap_motion_blocking: Vec<i16>,
+	pub heightmap_motion_blocking_no_leaves: Vec<i16>,
+	pub heightmap_ocean_floor: Vec<i16>,
+	pub heightmap_world_surface: Vec<i16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkSection {
+	pub blocks: Vec<u16>,
+	pub biomes: Vec<u8>,
+	pub sky_lights: Vec<u8>,
+	pub block_lights: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockOverwriteOutcome {
+	DestroyBlockentity,
+}
+
+impl World {
+	#[allow(clippy::new_without_default)]
+	pub fn new(loader: impl WorldLoader + 'static, entity_id_manager: &EntityIdManager, block_states: &HashMap<String, Block>) -> Self {
+		let mut dimensions: HashMap<String, Dimension> = HashMap::new();
+		let default_spawn_location: BlockPosition;
+		if loader.is_initialized() {
+			let now = std::time::Instant::now();
+			println!("loading existing world");
+			default_spawn_location = loader.get_default_spawn_location();
+			dimensions.insert(
+				"minecraft:overworld".to_string(),
+				Dimension::new_from_loader(&loader, entity_id_manager, block_states, "minecraft:overworld"),
+			);
+			dimensions.insert(
+				"minecraft:the_nether".to_string(),
+				Dimension::new_from_loader(&loader, entity_id_manager, block_states, "minecraft:the_nether"),
+			);
+			dimensions
+				.insert("minecraft:the_end".to_string(), Dimension::new_from_loader(&loader, entity_id_manager, block_states, "minecraft:the_end"));
+			println!("finished loading existing world in {:.2?}", now.elapsed());
+		} else {
+			println!("create new world");
+			dimensions.insert("minecraft:overworld".to_string(), Dimension::new("minecraft:overworld"));
+			dimensions.insert("minecraft:the_nether".to_string(), Dimension::new("minecraft:the_nether"));
+			dimensions.insert("minecraft:the_end".to_string(), Dimension::new("minecraft:the_end"));
+			default_spawn_location = BlockPosition {
+				x: 0,
+				y: -48,
+				z: 0,
+			};
+			println!("creation of new world finished");
+		}
+		return Self {
+			dimensions,
+			loader: Box::new(loader),
+			default_spawn_location,
+		};
+	}
+
+	pub fn save_to_disk(&mut self, block_states: &HashMap<String, Block>) {
+		self.dimensions.iter_mut().for_each(|x| x.1.save_to_disk(&*self.loader, block_states));
+		self.loader.write_level_dat(self.default_spawn_location);
+	}
+}
+
+impl Dimension {
+	#[allow(clippy::new_without_default)]
+	pub fn new(dimension_name: &str) -> Self {
+		let lowest_block_y = if dimension_name == "minecraft:overworld" { -64i16 } else { 0 };
+		let chunk_sections = if dimension_name == "minecraft:overworld" { 24 } else { 16 };
+		let mut chunks: HashMap<(i32, i32), Chunk> = HashMap::new();
+
+		for x in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
+			for z in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
+				chunks.insert((x as i32, z as i32), Chunk::new(x as i32, z as i32, chunk_sections));
+			}
+		}
+
+		let (sender, receiver) = channel();
+		return Self {
+			chunks: chunks
+				.into_iter()
+				.map(|(k, mut v)| {
+					v.keep_loaded_for_ticks = i32::MAX;
+					(k, v)
+				})
+				.collect(),
+			entities: Vec::new(),
+			name: dimension_name.to_string(),
+			lowest_block_y,
+			chunks_loading_sender: sender,
+			chunks_loading_receiver: Some(receiver),
+		};
+	}
+
+	pub fn new_from_loader(
+		loader: &impl loader::WorldLoader,
+		entity_id_manager: &EntityIdManager,
+		block_states: &HashMap<String, Block>,
+		dimension_name: &str,
+	) -> Self {
+		let mut chunks: HashMap<(i32, i32), Chunk> = HashMap::new();
+		let mut entities: Vec<Entity> = Vec::new();
+
+		for x in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
+			for z in -SPAWN_CHUNK_RADIUS..=SPAWN_CHUNK_RADIUS {
+				chunks.insert((x as i32, z as i32), loader.load_chunk(x as i32, z as i32, block_states, dimension_name));
+				entities.append(&mut loader.load_entities_in_chunk(x as i32, z as i32, entity_id_manager, dimension_name));
+			}
+		}
+
+		let (sender, receiver) = channel();
+		return Self {
+			chunks: chunks
+				.into_iter()
+				.map(|(k, mut v)| {
+					v.keep_loaded_for_ticks = i32::MAX;
+					(k, v)
+				})
+				.collect(),
+			entities,
+			name: dimension_name.to_string(),
+			lowest_block_y: if dimension_name == "minecraft:overworld" { -64i16 } else { 0 },
+			chunks_loading_sender: sender,
+			chunks_loading_receiver: Some(receiver),
+		};
+	}
+
+	pub fn get_chunk_from_position_mut(&mut self, position: BlockPosition) -> Option<&mut Chunk> {
+		let chunk_coordinates = position.convert_to_coordinates_of_chunk();
+
+		return self.chunks.get_mut(&(chunk_coordinates.x, chunk_coordinates.z));
+	}
+
+	pub fn get_chunk_from_position(&self, position: BlockPosition) -> Option<&Chunk> {
+		let chunk_coordinates = position.convert_to_coordinates_of_chunk();
+
+		return self.chunks.get(&(chunk_coordinates.x, chunk_coordinates.z));
+	}
+
+	pub fn get_chunk_from_chunk_position_mut(&mut self, chunk_coordinates: BlockPosition) -> Option<&mut Chunk> {
+		return self.chunks.get_mut(&(chunk_coordinates.x, chunk_coordinates.z));
+	}
+
+	pub fn get_chunk_from_chunk_position(&self, chunk_coordinates: BlockPosition) -> Option<&Chunk> {
+		return self.chunks.get(&(chunk_coordinates.x, chunk_coordinates.z));
+	}
+
+	pub fn overwrite_block(
+		&mut self,
+		global_position: BlockPosition,
+		block_state_id: u16,
+	) -> Result<Option<BlockOverwriteOutcome>, Box<dyn Error>> {
+		let lowest_block_y = self.lowest_block_y;
+		let chunk = self.get_chunk_from_position_mut(global_position);
+		if chunk.is_none() {
+			return Err(Box::new(crate::CustomError::ChunkNotFound(global_position)));
+		}
+		if global_position.y < -64 || global_position.y > 319 {
+			return Err(Box::new(crate::CustomError::PositionOutOfBounds(global_position)));
+		}
+
+		let res = chunk.unwrap().set_block(global_position, block_state_id, lowest_block_y);
+
+		self.update_skylight(global_position);
+		self.update_blocklight(global_position);
+
+		return Ok(res);
+	}
+
+	pub fn get_block(&self, position: BlockPosition) -> Result<u16, Box<dyn Error>> {
+		let chunk = self.get_chunk_from_position(position);
+		if chunk.is_none() {
+			return Err(Box::new(crate::CustomError::ChunkNotFound(position)));
+		}
+		if position.y < -64 || position.y > 319 {
+			return Err(Box::new(crate::CustomError::PositionOutOfBounds(position)));
+		}
+
+		let block_state_id = chunk.unwrap().get_block(position.convert_to_position_in_chunk(), self.lowest_block_y);
+		return Ok(block_state_id);
+	}
+
+	pub fn save_to_disk(&mut self, loader: &(impl WorldLoader + ?Sized), block_states: &HashMap<String, Block>) {
+		{
+			loader.save_to_disk(&self.chunks, self, block_states, &self.name);
+		}
+		self.chunks.retain(|_, x| x.keep_loaded_for_ticks > 0);
+		for chunk in &mut self.chunks {
+			chunk.1.modified = false;
+		}
+	}
+
+	pub fn get_entities_in_chunk(&self, x: i32, z: i32) -> Vec<&Entity> {
+		return self
+			.entities
+			.iter()
+			.filter(|e| {
+				let chunk_coords_of_entity = BlockPosition::from(e.get_common_entity_data().position).convert_to_coordinates_of_chunk();
+				return chunk_coords_of_entity.x == x && chunk_coords_of_entity.z == z;
+			})
+			.collect();
+	}
+
+	pub fn add_entity(&mut self, entity: Entity) {
+		self.get_chunk_from_position_mut(entity.get_common_entity_data().position.into()).unwrap().modified = true;
+		self.entities.push(entity);
+	}
+
+	pub fn add_entities(&mut self, mut entities: Vec<Entity>) {
+		for entity in &entities {
+			self.get_chunk_from_position_mut(entity.get_common_entity_data().position.into()).unwrap().modified = true;
+		}
+		self.entities.append(&mut entities);
+	}
+
+	pub fn summon_item(
+		&mut self,
+		position: EntityPosition,
+		slot: Slot,
+		player_uuid: Option<u128>,
+		players_clone: &[Player],
+		packet_sender: &PacketSender,
+		entity_id_manager: &EntityIdManager,
+	) {
+		let new_entity = ItemEntity {
+			common: CommonEntity {
+				position: EntityPosition {
+					x: position.x + 0.5,
+					z: position.z + 0.5,
+					..position
+				},
+				velocity: EntityPosition::default(),
+				uuid: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros(), //TODO: add proper UUID
+				entity_id: entity_id_manager.get_new(),
+				..Default::default()
+			},
+			age: 0,
+			health: 5,
+			item: slot,
+			owner: player_uuid.unwrap_or_default(),
+			pickup_delay: 0,
+			thrower: player_uuid.unwrap_or_default(),
+		};
+
+		let spawn_packet = new_entity.to_spawn_entity_packet();
+
+		packet_sender.send_packet_to_everyone_in_dimension(
+			players_clone,
+			&self.name,
+			crate::packets::clientbound::play::SpawnEntity::PACKET_ID,
+			spawn_packet,
+		);
+
+		new_entity.resend_metadata_to_players(players_clone, packet_sender, &self.name);
+
+		self.add_entity(Entity::Item(new_entity));
+	}
+
+	pub fn get_chunk_loading_receiver(&mut self) -> Receiver<(i32, i32)> {
+		return self.chunks_loading_receiver.take().unwrap();
+	}
+
+	fn update_skylight(&mut self, position_global: BlockPosition) {
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let lowest_block_y = self.lowest_block_y;
+		let Some(chunk) = self.get_chunk_from_chunk_position_mut(position_global.convert_to_coordinates_of_chunk()) else { return };
+
+		let block_state_id = chunk.get_block(position_in_chunk, lowest_block_y);
+		let block_type = data::blocks::get_type_from_block_state_id(block_state_id);
+		let new_light;
+		if !block_type.is_transparent() {
+			new_light = 0;
+		} else {
+			if chunk.has_block_sky_access(position_in_chunk, lowest_block_y) {
+				new_light = 15;
+			} else {
+				new_light = 0;
+			}
+		}
+
+		let old_light = chunk.get_skylight(position_global, lowest_block_y);
+		if old_light == new_light {
+			return;
+		}
+
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+		let packed_block_id = block_id / 2;
+		let is_high_portion = block_id % 2 == 1;
+
+		if chunk.sections[section_id as usize].sky_lights.is_empty() {
+			chunk.sections[section_id as usize].sky_lights = [0; 2048].to_vec();
+		}
+
+		if is_high_portion {
+			chunk.sections[section_id as usize].sky_lights[packed_block_id as usize] &= 0x0F;
+			chunk.sections[section_id as usize].sky_lights[packed_block_id as usize] |= new_light << 4;
+		} else {
+			chunk.sections[section_id as usize].sky_lights[packed_block_id as usize] &= 0xF0;
+			chunk.sections[section_id as usize].sky_lights[packed_block_id as usize] |= new_light;
+		}
+	}
+
+	pub fn update_blocklight(&mut self, position_global: BlockPosition) {
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let lowest_block_y = self.lowest_block_y;
+		let Some(chunk) = self.get_chunk_from_chunk_position_mut(position_global.convert_to_coordinates_of_chunk()) else { return };
+
+		let block_state_id = chunk.get_block(position_in_chunk, lowest_block_y);
+
+		let old_light = chunk.get_blocklight(position_global, lowest_block_y);
+		let new_light = crate::block::get_light_level(block_state_id);
+		if old_light == new_light {
+			return;
+		}
+
+		self.set_blocklight_level(position_global, new_light);
+
+		if new_light == 1 {
+			return;
+		}
+		let mut visited = vec![position_global];
+		self.set_blocklight_level_of_neighbours(position_global, new_light, &mut visited);
+	}
+
+	fn set_blocklight_level_of_neighbours(&mut self, position_global: BlockPosition, new_light: u8, visited: &mut Vec<BlockPosition>) {
+		let lowest_block_y = self.lowest_block_y;
+		for neighbour in position_global.get_direct_neighbours() {
+			if visited.contains(&neighbour) {
+				continue;
+			}
+			visited.push(neighbour);
+
+			let Some(chunk) = self.get_chunk_from_chunk_position_mut(neighbour.convert_to_coordinates_of_chunk()) else {
+				continue;
+			};
+
+			let block_state_id = chunk.get_block(neighbour.convert_to_position_in_chunk(), lowest_block_y);
+			let block_type = data::blocks::get_type_from_block_state_id(block_state_id);
+			if !block_type.is_transparent() {
+				continue;
+			}
+
+			let old_light = chunk.get_blocklight(neighbour, lowest_block_y);
+			let new_light = if new_light > 0 { new_light - 1 } else { 0 };
+			if old_light >= new_light {
+				continue;
+			}
+
+			self.set_blocklight_level(neighbour, new_light);
+			self.set_blocklight_level_of_neighbours(neighbour, new_light, visited);
+		}
+	}
+
+	fn set_blocklight_level(&mut self, position_global: BlockPosition, new_light_level: u8) {
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let lowest_block_y = self.lowest_block_y;
+		let Some(chunk) = self.get_chunk_from_chunk_position_mut(position_global.convert_to_coordinates_of_chunk()) else { return };
+
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+		let packed_block_id = block_id / 2;
+		let is_high_portion = block_id % 2 == 1;
+
+		if chunk.sections[section_id as usize].block_lights.is_empty() {
+			chunk.sections[section_id as usize].block_lights = [0; 2048].to_vec();
+		}
+
+		if is_high_portion {
+			chunk.sections[section_id as usize].block_lights[packed_block_id as usize] &= 0x0F;
+			chunk.sections[section_id as usize].block_lights[packed_block_id as usize] |= new_light_level << 4;
+		} else {
+			chunk.sections[section_id as usize].block_lights[packed_block_id as usize] &= 0xF0;
+			chunk.sections[section_id as usize].block_lights[packed_block_id as usize] |= new_light_level;
+		}
+	}
+}
+
+impl Chunk {
+	pub fn new(chunk_x: i32, chunk_z: i32, chunk_sections: u8) -> Self {
+		let filled_chunk_sections = vec![
+			ChunkSection {
+				blocks: vec![1; 4096],
+				biomes: vec![40; 64],
+				sky_lights: vec![0x00; 2048],
+				block_lights: vec![0x00; 2048]
+			};
+			1
+		];
+		let empty_chunk_sections = vec![
+			ChunkSection {
+				blocks: vec![0; 4096],
+				biomes: vec![40; 64],
+				sky_lights: vec![0xFF; 2048],
+				block_lights: vec![0x00; 2048]
+			};
+			chunk_sections as usize - 1
+		];
+		let mut all_chunk_sections = filled_chunk_sections.clone();
+		all_chunk_sections.append(&mut empty_chunk_sections.clone());
+
+		let heightmap = if chunk_sections == 24 { [-49; 256] } else { [15; 256] };
+
+		return Self {
+			x: chunk_x,
+			z: chunk_z,
+			sections: all_chunk_sections,
+			last_update: 0,
+			inhabited_time: 0,
+			is_light_on: true,
+			modified: true,
+			block_entities: Vec::new(),
+			keep_loaded_for_ticks: 20 * 60,
+			heightmap_motion_blocking: heightmap.to_vec(),
+			heightmap_motion_blocking_no_leaves: heightmap.to_vec(),
+			heightmap_ocean_floor: heightmap.to_vec(),
+			heightmap_world_surface: heightmap.to_vec(),
+		};
+	}
+
+	fn set_block(&mut self, position_global: BlockPosition, block_state_id: u16, lowest_block_y: i16) -> Option<BlockOverwriteOutcome> {
+		self.modified = true;
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+		if self.sections[section_id as usize].blocks.is_empty() {
+			self.sections[section_id as usize].blocks = [0; 4096].to_vec();
+		}
+		if block_id < 0 {
+			return None;
+		}
+		self.sections[section_id as usize].blocks[block_id as usize] = block_state_id;
+
+		let destroy_blockentity =
+			if self.try_get_block_entity(position_global).is_some() { Some(BlockOverwriteOutcome::DestroyBlockentity) } else { None };
+
+		if let Some(blockentity) =
+			crate::blockentity::BlockEntity::new_from_block(data::blocks::get_type_from_block_state_id(block_state_id), position_global)
+		{
+			self.block_entities.push(blockentity);
+		}
+
+		if !self.heightmap_motion_blocking.is_empty() {
+			assert!(self.heightmap_motion_blocking.len() == 256);
+			self.heightmap_motion_blocking[(position_in_chunk.x + position_in_chunk.z * 16) as usize] =
+				self.get_highest_motion_blocking_block_y(position_global.x, position_global.z, lowest_block_y);
+		}
+		if !self.heightmap_motion_blocking_no_leaves.is_empty() {
+			assert!(self.heightmap_motion_blocking_no_leaves.len() == 256);
+			self.heightmap_motion_blocking_no_leaves[(position_in_chunk.x + position_in_chunk.z * 16) as usize] =
+				self.get_highest_motion_blocking_block_y_no_leaves(position_global.x, position_global.z, lowest_block_y);
+		}
+		if !self.heightmap_world_surface.is_empty() {
+			assert!(self.heightmap_world_surface.len() == 256);
+			self.heightmap_world_surface[(position_in_chunk.x + position_in_chunk.z * 16) as usize] =
+				self.get_highest_world_surface(position_global.x, position_global.z, lowest_block_y);
+		}
+		if !self.heightmap_ocean_floor.is_empty() {
+			assert!(self.heightmap_ocean_floor.len() == 256);
+			self.heightmap_ocean_floor[(position_in_chunk.x + position_in_chunk.z * 16) as usize] =
+				self.get_highest_ocean_floor(position_global.x, position_global.z, lowest_block_y);
+		}
+
+		return destroy_blockentity;
+	}
+
+	pub fn get_block(&self, position_in_chunk: BlockPosition, lowest_block_y: i16) -> u16 {
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+
+		if section_id as usize >= self.sections.len() {
+			return 0;
+		}
+
+		if self.sections[section_id as usize].blocks.is_empty() {
+			return 0;
+		}
+
+		if position_in_chunk.y < lowest_block_y {
+			return 0;
+		}
+
+
+		if section_id as usize >= self.sections.len() {
+			return 0;
+		}
+
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+		return self.sections[section_id as usize].blocks[block_id as usize];
+	}
+
+	pub fn try_get_block_entity(&self, position: BlockPosition) -> Option<&BlockEntity> {
+		return self.block_entities.iter().find(|x| x.get_position() == position);
+	}
+
+	pub fn try_get_block_entity_mut(&mut self, position: BlockPosition) -> Option<&mut BlockEntity> {
+		self.modified = true; //cant know what caller will do with the &mut so better be safe
+		return self.block_entities.iter_mut().find(|x| x.get_position() == position);
+	}
+
+	pub fn get_light(&self, position_global: BlockPosition, lowest_block_y: i16) -> u8 {
+		let skylight = self.get_skylight(position_global, lowest_block_y);
+		assert!(skylight < 16);
+		let blocklight = self.get_blocklight(position_global, lowest_block_y);
+		assert!(blocklight < 16);
+		if skylight > blocklight {
+			return skylight;
+		} else {
+			return blocklight;
+		}
+	}
+
+	pub fn get_skylight(&self, position_global: BlockPosition, lowest_block_y: i16) -> u8 {
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+
+		let packed_block_id = block_id / 2;
+		let is_high_portion = block_id % 2 == 1;
+
+		if self.sections[section_id as usize].sky_lights.is_empty() {
+			return 0;
+		}
+
+		if is_high_portion {
+			return (self.sections[section_id as usize].sky_lights[packed_block_id as usize] & 0xF0) >> 4;
+		} else {
+			return self.sections[section_id as usize].sky_lights[packed_block_id as usize] & 0x0F;
+		}
+	}
+
+	pub fn get_blocklight(&self, position_global: BlockPosition, lowest_block_y: i16) -> u8 {
+		let position_in_chunk = position_global.convert_to_position_in_chunk();
+		let section_id = (position_in_chunk.y + -lowest_block_y) / 16;
+		let block_id = position_in_chunk.x
+			+ (position_in_chunk.z * 16)
+			+ (((position_in_chunk.y + -lowest_block_y) as i32 - (section_id as i32 * 16)) * 256);
+
+		let packed_block_id = block_id / 2;
+		let is_high_portion = block_id % 2 == 1;
+
+		if self.sections[section_id as usize].block_lights.is_empty() {
+			return 0;
+		}
+
+		if is_high_portion {
+			return (self.sections[section_id as usize].block_lights[packed_block_id as usize] & 0xF0) >> 4;
+		} else {
+			return self.sections[section_id as usize].block_lights[packed_block_id as usize] & 0x0F;
+		}
+	}
+
+	fn has_block_sky_access(&self, position_in_chunk: BlockPosition, lowest_block_y: i16) -> bool {
+		let highest_block_y = if lowest_block_y == -64 { 319 } else { 256 };
+
+		for y in position_in_chunk.y..=highest_block_y {
+			let block = self.get_block(
+				BlockPosition {
+					y,
+					..position_in_chunk
+				},
+				lowest_block_y,
+			);
+
+			let block_type = data::blocks::get_type_from_block_state_id(block);
+
+			if !block_type.is_transparent() {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	fn get_highest_motion_blocking_block_y(&self, x: i32, z: i32, lowest_block_y: i16) -> i16 {
+		let highest_block_y = if lowest_block_y == -64 { 319 } else { 256 };
+
+		for y in (lowest_block_y..=highest_block_y).rev() {
+			let block = self.get_block(
+				BlockPosition {
+					x,
+					y,
+					z,
+				}
+				.convert_to_position_in_chunk(),
+				lowest_block_y,
+			);
+
+			let block_type = data::blocks::get_type_from_block_state_id(block);
+
+			if !block_type.has_no_collision_box() || block_type == Type::Liquid {
+				return y;
+			}
+		}
+
+		return lowest_block_y - 1;
+	}
+
+	fn get_highest_motion_blocking_block_y_no_leaves(&self, x: i32, z: i32, lowest_block_y: i16) -> i16 {
+		let highest_block_y = if lowest_block_y == -64 { 319 } else { 256 };
+
+		for y in (lowest_block_y..=highest_block_y).rev() {
+			let block = self.get_block(
+				BlockPosition {
+					x,
+					y,
+					z,
+				}
+				.convert_to_position_in_chunk(),
+				lowest_block_y,
+			);
+
+			let block_type = data::blocks::get_type_from_block_state_id(block);
+
+			if (!block_type.has_no_collision_box() || block_type == Type::Liquid)
+				&& !(block_type == Type::CherryLeaves
+					|| block_type == Type::TintedLeaves
+					|| block_type == Type::PaleOakLeaves
+					|| block_type == Type::MangroveLeaves
+					|| block_type == Type::TintedParticleLeaves
+					|| block_type == Type::UntintedParticleLeaves)
+			{
+				return y;
+			}
+		}
+
+		return lowest_block_y - 1;
+	}
+
+	fn get_highest_world_surface(&self, x: i32, z: i32, lowest_block_y: i16) -> i16 {
+		let highest_block_y = if lowest_block_y == -64 { 319 } else { 256 };
+
+		for y in (lowest_block_y..=highest_block_y).rev() {
+			let block = self.get_block(
+				BlockPosition {
+					x,
+					y,
+					z,
+				}
+				.convert_to_position_in_chunk(),
+				lowest_block_y,
+			);
+
+			if block != 0 {
+				return y;
+			}
+		}
+
+		return lowest_block_y - 1;
+	}
+
+	fn get_highest_ocean_floor(&self, x: i32, z: i32, lowest_block_y: i16) -> i16 {
+		let highest_block_y = if lowest_block_y == -64 { 319 } else { 256 };
+
+		for y in (lowest_block_y..=highest_block_y).rev() {
+			let block = self.get_block(
+				BlockPosition {
+					x,
+					y,
+					z,
+				}
+				.convert_to_position_in_chunk(),
+				lowest_block_y,
+			);
+
+			let block_type = data::blocks::get_type_from_block_state_id(block);
+
+			if !(block == 0 || block_type == Type::Liquid) {
+				return y;
+			}
+		}
+
+		return lowest_block_y - 1;
+	}
+}
+
+impl ChunkSection {
+	pub fn get_non_air_block_count(&self) -> u16 {
+		return self.blocks.iter().filter(|x| **x != 0).count() as u16;
+	}
+}

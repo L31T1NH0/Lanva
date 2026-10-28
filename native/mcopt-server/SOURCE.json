@@ -1,0 +1,24 @@
+{
+  "source": "mcopt-linux 0.2.0-alpha.6 local snapshot",
+  "files": {
+    "metal/src/main/java/mcopt/metal/RustNative.java": "7fc99c878cdad83e6e009db3e9ab874d9fae769b9d7ffa70cd29e0f89a266a65",
+    "metal/src/main/java/mcopt/metal/lod/GenServerNoise.java": "3418a10b547be3d37a5f7c1867957a87d0ab70f9374ff2381818fbcfccf842a7",
+    "metal/src/main/java/mcopt/metal/lod/LodNativeNoise.java": "aca39d8938aa3fb6fae05550ce456a2df3bb6476f7e11d5b0912ff8d14c43147",
+    "metal/src/main/java/mcopt/metal/lod/LodNoiseKernels.java": "63db7f8c3668a7e3d638c290d9f73f61f0e3a33961f51f3a7dabc5273852e30e",
+    "metal/src/main/java/mcopt/metal/lod/LodNoiseVector.java": "14d30fbdd4fc3e149df539af440c3dae40a5b08753005ddbc603c726e26a4af8",
+    "metal/src/main/java/mcopt/metal/mixin/gen/GenNoiseChunkMixin.java": "a9071e898331d31d393470a1912f975ad95e6316628429f1427ea708ab3c5227",
+    "metal/src/main/java/mcopt/metal/mixin/gen/GenMixinPlugin.java": "f38fee7a5ab42dc76eeb7c66d7bc7ae1b06c82e6a83df755ddf5e9261357c661",
+    "metal/src/main/java/mcopt/metal/mixin/chunk/ChunkAccessSectionMixin.java": "9d74e73602f16da8f063fcd27a32c94f7388af58744ab1e736135361845e4cc9",
+    "metal/src/main/resources/mcopt-metal-gen.mixins.json": "b073840976d5a93ad652d1a7e367217d63a28e6f1efe0cccbe9f6f9e1d0c9b03",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "NOTICE": "140ae85f9edc3c55f91e14f01608914f894d41d9e0059050b1b7157198695724",
+    "tools/check-rust.py": "005fdf9f620859b4db2e56e2a6a8b7acee56e18f699d81b1b304dad4e6a73238",
+    "tools/rust-kernel-fixtures.json": "e5b8652b66c45219c8dfaebbf9ebd336aaba81872525eb01a6b9ba7c9e49526f",
+    "metal/src/main/rust/Cargo.toml": "4ce05162ddcaf72158eba25997bb85da95975e2d5d4e0c432b17379b4cfb9a43",
+    "metal/src/main/rust/Cargo.lock": "18ab5a33340e76dca35a4dd0937ed8bc619e918fac095e8a569c17edc220d5c5",
+    "metal/src/main/rust/README.md": "c089e0a90d3953f9945764048a323f7417f651dd9d0e2067231acd0fc011067e",
+    "metal/src/main/rust/src/noise.rs": "8bdaf2ad8887249cb0c2a98ed8396d3e4c3566050fc44f1066feaae1a4908e2f",
+    "metal/src/main/rust/src/lib.rs": "0c7ac3c0484a5d7fdc442cbc641554724c67ef0b90311c0eb25eb9f637092de7",
+    "metal/src/main/rust/src/mesh.rs": "df8084a9ec8818a35cd962bec6f224e9e5b6c86b7f85ddd4ba00baa71cd8b124"
+  }
+}

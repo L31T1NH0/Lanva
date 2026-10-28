@@ -1,0 +1,45 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/screen" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:fillViewport="true" android:clipToPadding="false">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:padding="24dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Lanva 0.3.2" android:textSize="28sp" android:textStyle="bold" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:text="Seu servidor Minecraft Java no Android." android:textSize="16sp" />
+        <Button android:id="@+id/version" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:minHeight="48dp" android:text="Escolher versão" android:enabled="false" />
+        <TextView android:id="@+id/version_hint" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textSize="14sp" />
+        <Button android:id="@+id/files" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:minHeight="48dp" android:text="Arquivos do servidor" />
+        <Button android:id="@+id/storage" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:minHeight="48dp" android:text="Pasta dos servidores" android:enabled="false" />
+        <TextView android:id="@+id/storage_path" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textSize="14sp" android:textIsSelectable="true" />
+        <TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="32dp" android:text="Parado" android:textSize="22sp"
+            android:textStyle="bold" android:accessibilityLiveRegion="polite" />
+        <TextView android:id="@+id/address" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:textSize="16sp" android:textIsSelectable="true" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="16dp" android:text="Conecte o Minecraft Java na mesma rede Wi-Fi, usando a versão escolhida acima." android:textSize="14sp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:text="Instalação limpa com Fabric. Adicione mods compatíveis pela pasta mods. Os mundos anteriores continuam em pastas separadas." android:textSize="14sp" />
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" android:orientation="horizontal">
+            <Button android:id="@+id/start" android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:minHeight="48dp" android:text="Iniciar servidor" android:enabled="false" />
+            <Button android:id="@+id/stop" android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:layout_marginStart="8dp" android:minHeight="48dp"
+                android:text="Salvar e parar" android:enabled="false" />
+        </LinearLayout>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="32dp" android:layout_marginBottom="12dp"
+            android:text="Registro do servidor" android:textStyle="bold" android:textSize="18sp" />
+        <TextView android:id="@+id/logs" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:fontFamily="monospace" android:textSize="12sp" android:textIsSelectable="true"
+            android:text="Toque em Iniciar servidor para começar." />
+    </LinearLayout>
+</ScrollView>
+

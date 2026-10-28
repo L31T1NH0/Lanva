@@ -1,0 +1,16 @@
+.gradle/
+.gradle-home/
+build/
+app/build/
+app/src/main/jniLibs/
+app/src/main/assets/java*.zip
+app/src/main/assets/java*-native-links.txt
+app/src/main/assets/fabric-server.jar
+app/src/main/assets/fabric-bootstrap.jar
+app/src/main/assets/server-mods/
+app/src/main/assets/mcopt-server-26.3.jar
+local.properties
+.idea/
+*.iml
+__pycache__/
+
